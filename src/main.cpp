@@ -5,7 +5,7 @@
 #include <ArduinoJson.h>
 
 // Constantes para usar WiFi
-const char *ssid = "UPB";
+const char *ssid = "UPBWiFi";
 const char *password = "";
 const char *orionURL = "http://10.199.26.8:1026/v2/entities"; // Orion Context Broker
 
@@ -18,31 +18,13 @@ const char *orionURL = "http://10.199.26.8:1026/v2/entities"; // Orion Context B
 #define LORA_DIO0 26
 #define LED 13
 
-// Constantes del dispositivo receptor
-const char *receiverId = "lora-receiver-01";
-const char *receiverType = "LoRaReceiver";
+// ID fijo del dispositivo sensor (debería coincidir con el que envía el transmisor) o el carrito
+const char *sensorId = "sensor001";
 
 HTTPClient http;
 String output;
 int state = 1;
-int entityCounter = 1;
 
-/**
- * Configuración inicial
- */
-void setup()
-{
-    Serial.begin(115200);
-    pinMode(LED, OUTPUT);
-    
-    // Configurar LoRa
-    setupLoRa();
-    
-    // Conectar WiFi
-    connectWiFi();
-    
-    Serial.println("Receptor LoRa FIWARE listo - Esperando datos...");
-}
 
 void connectWiFi() {
     Serial.println("Connecting to " + String(ssid));
@@ -80,83 +62,73 @@ void setupLoRa() {
 }
 
 /**
- * Extrae valores numéricos del mensaje LoRa
+ * Extrae todos los datos del mensaje LoRa (GPS, temperatura, humedad)
  */
-bool extractGPSData(String message, float &lat, float &lon) {
-    // Buscar patrones comunes en mensajes GPS
+bool extractSensorData(String message, float &lat, float &lon, float &temp, float &hum) {
+    // Formato esperado: "Lat: 40.712800, Lon: -74.006000, Temp: 25.5, Hum: 60.5"
+    
+    // Buscar índices de cada campo
     int latIndex = message.indexOf("Lat:");
     int lonIndex = message.indexOf("Lon:");
+    int tempIndex = message.indexOf("Temp:");
+    int humIndex = message.indexOf("Hum:");
     
-    if (latIndex != -1 && lonIndex != -1) {
-        String latStr = message.substring(latIndex + 4, lonIndex);
-        String lonStr = message.substring(lonIndex + 4);
-        
-        // Limpiar y convertir
-        latStr.trim();
-        lonStr.trim();
-        
-        // Remover comas si existen
-        latStr.replace(",", "");
-        lonStr.replace(",", "");
-        
-        lat = latStr.toFloat();
-        lon = lonStr.toFloat();
-        
-        return (lat != 0.0 && lon != 0.0);
+    // Verificar que todos los campos estén presentes
+    if (latIndex == -1 || lonIndex == -1 || tempIndex == -1 || humIndex == -1) {
+        Serial.println("❌ Formato de mensaje incorrecto");
+        return false;
     }
     
-    return false;
+    // Extraer latitud (entre "Lat:" y "Lon:")
+    String latStr = message.substring(latIndex + 4, lonIndex);
+    latStr.trim();
+    latStr.replace(",", "");
+    lat = latStr.toFloat();
+    
+    // Extraer longitud (entre "Lon:" y "Temp:")
+    String lonStr = message.substring(lonIndex + 4, tempIndex);
+    lonStr.trim();
+    lonStr.replace(",", "");
+    lon = lonStr.toFloat();
+    
+    // Extraer temperatura (entre "Temp:" y "Hum:")
+    String tempStr = message.substring(tempIndex + 5, humIndex);
+    tempStr.trim();
+    tempStr.replace(",", "");
+    temp = tempStr.toFloat();
+    
+    // Extraer humedad (desde "Hum:" hasta el final)
+    String humStr = message.substring(humIndex + 4);
+    humStr.trim();
+    hum = humStr.toFloat();
+    
+    Serial.printf("✅ Datos extraídos - Lat: %.6f, Lon: %.6f, Temp: %.2f, Hum: %.2f\n", 
+                  lat, lon, temp, hum);
+    
+    return (lat != 0.0 && lon != 0.0);
 }
 
 /**
- * Crea una entidad NGSI-LD para FIWARE Orion
+ * Crea el JSON para actualizar atributos (sin id ni type)
  */
-String createFIWAREEntity(String loraMessage, int rssi, float snr) {
+String createUpdatePayload(float lat, float lon, float temp, float hum) {
     JsonDocument doc;
     
-    // ID único para la entidad
-    String entityId = "urn:ngsi-ld:Sensor:" + String(receiverId) + "-" + String(entityCounter);
-    entityCounter++;
+    // Solo los atributos a actualizar (sin id ni type)
+    JsonObject humedad = doc["humedad"].to<JsonObject>();
+    humedad["type"] = "float";
+    humedad["value"] = hum;
+    humedad["metadata"] = JsonObject();
     
-    doc["id"] = entityId;
-    doc["type"] = "Sensor";
+    JsonObject temperatura = doc["temperatura"].to<JsonObject>();
+    temperatura["type"] = "float";
+    temperatura["value"] = temp;
+    temperatura["metadata"] = JsonObject();
     
-    // Atributo: mensaje recibido
-    JsonObject message = doc["message"].to<JsonObject>();
-    message["type"] = "Property";
-    message["value"] = loraMessage;
-    
-    // Atributo: intensidad de señal
-    JsonObject signalStrength = doc["rssi"].to<JsonObject>();
-    signalStrength["type"] = "Property";
-    signalStrength["value"] = rssi;
-    signalStrength["unitCode"] = "dBm";
-    
-    // Atributo: relación señal-ruido
-    JsonObject signalNoise = doc["snr"].to<JsonObject>();
-    signalNoise["type"] = "Property";
-    signalNoise["value"] = snr;
-    signalNoise["unitCode"] = "dB";
-    
-    // Atributo: timestamp
-    JsonObject timestamp = doc["timestamp"].to<JsonObject>();
-    timestamp["type"] = "Property";
-    timestamp["value"] = millis();
-    
-    // Extraer coordenadas GPS si están en el mensaje
-    float lat = 0.0, lon = 0.0;
-    if (extractGPSData(loraMessage, lat, lon)) {
-        JsonObject location = doc["location"].to<JsonObject>();
-        location["type"] = "GeoProperty";
-        location["value"]["type"] = "Point";
-        location["value"]["coordinates"][0] = lon;
-        location["value"]["coordinates"][1] = lat;
-    }
-    
-    // Atributo: dispositivo receptor
-    JsonObject receiver = doc["receiver"].to<JsonObject>();
-    receiver["type"] = "Property";
-    receiver["value"] = receiverId;
+    JsonObject location = doc["location"].to<JsonObject>();
+    location["type"] = "geo:point";
+    location["value"] = String(lat, 6) + "," + String(lon, 6);
+    location["metadata"] = JsonObject();
     
     String jsonString;
     serializeJson(doc, jsonString);
@@ -164,46 +136,69 @@ String createFIWAREEntity(String loraMessage, int rssi, float snr) {
 }
 
 /**
- * Envía entidad a Orion Context Broker
+ * Envía actualización a Orion Context Broker usando PATCH
  */
-bool sendToOrion(String entityJson) {
-    // Primero intentamos crear la entidad
-    http.begin(orionURL);
+bool sendToOrion(String updatePayload) {
+    // URL para actualizar atributos específicos
+    String updateURL = String(orionURL) + "/" + sensorId + "/attrs";
+    Serial.print("URL de actualización: ");
+    Serial.println(updateURL);
+    
+    http.begin(updateURL);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("User-Agent", "TTGO-LoRa-FIWARE/1.0");
     
-    Serial.println("Enviando a Orion...");
-    Serial.println(entityJson);
+    Serial.println("Actualizando entidad en Orion...");
+    Serial.println(updatePayload);
     
-    int httpResponseCode = http.POST(entityJson);
+    // USAR PATCH para actualizar solo los atributos enviados
+    int httpResponseCode = http.PATCH(updatePayload);
     
     bool success = false;
-    if (httpResponseCode == 201 || httpResponseCode == 204) {
-        Serial.println("✅ Entidad creada en Orion");
+    if (httpResponseCode == 204) {
+        Serial.println("✅ Atributos actualizados exitosamente con PATCH");
         success = true;
-    } else if (httpResponseCode == 422) {
-        // La entidad ya existe, intentar actualizar
-        Serial.println("⚠️  Entidad existe, actualizando...");
+    } else if (httpResponseCode == 404) {
+        // La entidad no existe, necesitamos crearla primero
+        Serial.println("⚠️  Entidad no existe, creando...");
         
-        // Extraer ID de la entidad para la URL de actualización
-        JsonDocument doc;
-        deserializeJson(doc, entityJson);
-        String entityId = doc["id"].as<String>();
+        // Crear JSON completo para la entidad
+        JsonDocument entityDoc;
+        entityDoc["id"] = sensorId;
+        entityDoc["type"] = "sensorTempHum";
         
-        // CORRECCIÓN: URL de actualización sin "/" duplicado
-        String updateURL = String(orionURL) + "/" + entityId + "/attrs";
-        Serial.print("URL de actualización: ");
-        Serial.println(updateURL);
+        // Copiar los atributos del payload de actualización
+        JsonDocument updateDoc;
+        deserializeJson(updateDoc, updatePayload);
         
-        http.begin(updateURL);
+        JsonObject humedad = entityDoc["humedad"].to<JsonObject>();
+        humedad["type"] = "float";
+        humedad["value"] = updateDoc["humedad"]["value"];
+        humedad["metadata"] = JsonObject();
+        
+        JsonObject temperatura = entityDoc["temperatura"].to<JsonObject>();
+        temperatura["type"] = "float";
+        temperatura["value"] = updateDoc["temperatura"]["value"];
+        temperatura["metadata"] = JsonObject();
+        
+        JsonObject location = entityDoc["location"].to<JsonObject>();
+        location["type"] = "geo:point";
+        location["value"] = updateDoc["location"]["value"];
+        location["metadata"] = JsonObject();
+        
+        String entityJson;
+        serializeJson(entityDoc, entityJson);
+        
+        // Crear entidad con POST
+        http.begin(orionURL);
         http.addHeader("Content-Type", "application/json");
         
-        httpResponseCode = http.PATCH(entityJson);
-        if (httpResponseCode == 204) {
-            Serial.println("✅ Entidad actualizada en Orion");
+        httpResponseCode = http.POST(entityJson);
+        if (httpResponseCode == 201) {
+            Serial.println("✅ Entidad creada exitosamente");
             success = true;
         } else {
-            Serial.print("❌ Error en actualización: ");
+            Serial.print("❌ Error creando entidad: ");
             Serial.println(httpResponseCode);
         }
     } else {
@@ -212,13 +207,30 @@ bool sendToOrion(String entityJson) {
         
         String response = http.getString();
         if (response.length() > 0) {
-            Serial.print("Respuesta: ");
+            Serial.print("Respuesta del servidor: ");
             Serial.println(response);
         }
     }
     
     http.end();
     return success;
+}
+
+/**
+ * Configuración inicial
+ */
+void setup()
+{
+    Serial.begin(115200);
+    pinMode(LED, OUTPUT);
+    
+    // Configurar LoRa
+    setupLoRa();
+    
+    // Conectar WiFi
+    connectWiFi();
+    
+    Serial.println("Receptor LoRa FIWARE listo - Esperando datos GPS+Temperatura+Humedad...");
 }
 
 /**
@@ -233,41 +245,39 @@ void loop()
         int packetSize = LoRa.parsePacket();
         
         if (packetSize) {
-            // Leer el mensaje
+            // Leer el mensaje completo
             String mensaje = "";
             while (LoRa.available()) {
                 mensaje += (char)LoRa.read();
             }
             
-            int rssi = LoRa.packetRssi();
-            float snr = LoRa.packetSnr();
-            
-            Serial.println("=== DATO RECIBIDO ===");
+            Serial.println("\n=== DATO RECIBIDO POR LoRa ===");
             Serial.print("Mensaje: ");
             Serial.println(mensaje);
-            Serial.print("RSSI: ");
-            Serial.print(rssi);
-            Serial.println(" dBm");
-            Serial.print("SNR: ");
-            Serial.print(snr);
-            Serial.println(" dB");
             
-            // Crear entidad FIWARE
-            String entityJson = createFIWAREEntity(mensaje, rssi, snr);
-            output = entityJson;
-            state = 2;
-            
-            // LED indicador
-            digitalWrite(LED, LOW);
-            delay(100);
-            digitalWrite(LED, HIGH);
+            // Extraer datos del sensor
+            float lat = 0.0, lon = 0.0, temp = 0.0, hum = 0.0;
+            if (extractSensorData(mensaje, lat, lon, temp, hum)) {
+                // Crear payload de actualización (solo atributos)
+                String updatePayload = createUpdatePayload(lat, lon, temp, hum);
+                output = updatePayload;
+                state = 2;
+                
+                // LED indicador
+                digitalWrite(LED, LOW);
+                delay(100);
+                digitalWrite(LED, HIGH);
+            } else {
+                Serial.println("❌ No se pudieron extraer los datos del mensaje");
+                state = 3; // Saltar a espera
+            }
         }
     }
     break;
 
     case 2: // SEND - Enviar a FIWARE Orion
     {
-        Serial.println("Enviando datos a FIWARE Orion...");
+        Serial.println("Actualizando datos en FIWARE Orion...");
         
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("WiFi desconectado - Reconectando...");
@@ -278,7 +288,7 @@ void loop()
         if (WiFi.status() == WL_CONNECTED) {
             bool success = sendToOrion(output);
             if (success) {
-                Serial.println("✅ Datos enviados exitosamente a FIWARE");
+                Serial.println("✅ Datos esenciales actualizados exitosamente en FIWARE");
             } else {
                 Serial.println("❌ Falló el envío a FIWARE");
             }
@@ -292,8 +302,8 @@ void loop()
 
     case 3: // WAIT - Breve espera
     {
-        Serial.println("Esperando 2 segundos...");
-        delay(2000);
+        Serial.println("Esperando 5 segundos para siguiente recepción...");
+        delay(5000);
         state = 1;
     }
     break;
