@@ -9,21 +9,26 @@ const char *ssid = "UPBWiFi";
 const char *password = "";
 const char *orionURL = "http://10.199.26.8:1026/v2/entities"; // Orion Context Broker
 
-// Configuración LoRa para TTGO T-Beam
-#define LORA_SCK 5
-#define LORA_MISO 19
-#define LORA_MOSI 27
-#define LORA_CS 18
+// Configuración LoRa IDÉNTICA al transmisor
+#define CONFIG_RADIO_FREQ           915.0  // Frecuencia LoRa
+#define CONFIG_RADIO_OUTPUT_POWER   17     // Potencia de transmisión LoRa  
+#define CONFIG_RADIO_BW             125.0  // Ancho de banda LoRa
+
+// Pines LoRa iguales al transmisor
+#define LORA_SS 5
 #define LORA_RST 14
-#define LORA_DIO0 26
+#define LORA_DIO0 2
+
+// LED para indicar actividad
 #define LED 13
 
-// ID fijo del dispositivo sensor (debería coincidir con el que envía el transmisor) o el carrito
+// ID fijo del dispositivo sensor
 const char *sensorId = "sensor001";
 
 HTTPClient http;
 String output;
 int state = 1;
+
 
 
 void connectWiFi() {
@@ -50,15 +55,33 @@ void connectWiFi() {
 }
 
 void setupLoRa() {
-    SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
-    LoRa.setPins(LORA_CS, LORA_RST, LORA_DIO0);
+    // CONFIGURACIÓN IDÉNTICA AL TRANSMISOR
+    LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
     
-    if (!LoRa.begin(915E6)) {
-        Serial.println("Error iniciando LoRa!");
+    if (!LoRa.begin(CONFIG_RADIO_FREQ * 1000000)) {
+        Serial.println("Starting LoRa failed!");
         while (1);
     }
-    
-    Serial.println("LoRa iniciado en 915MHz");
+
+    // Misma configuración que el transmisor
+    LoRa.setTxPower(CONFIG_RADIO_OUTPUT_POWER);
+    LoRa.setSignalBandwidth(CONFIG_RADIO_BW * 1000);
+    LoRa.setSpreadingFactor(10);
+    LoRa.setPreambleLength(16);
+    LoRa.setSyncWord(0xAB);
+    LoRa.disableCrc();
+    LoRa.disableInvertIQ();
+    LoRa.setCodingRate4(7);
+
+    Serial.println("LoRa Receiver iniciado - Configuración idéntica al transmisor");
+    Serial.print("Frecuencia: ");
+    Serial.print(CONFIG_RADIO_FREQ);
+    Serial.println(" MHz");
+    Serial.print("Ancho de banda: ");
+    Serial.print(CONFIG_RADIO_BW);
+    Serial.println(" kHz");
+    Serial.print("Spreading Factor: ");
+    Serial.println(10);
 }
 
 /**
@@ -224,7 +247,7 @@ void setup()
     Serial.begin(115200);
     pinMode(LED, OUTPUT);
     
-    // Configurar LoRa
+    // Configurar LoRa (CONFIGURACIÓN IDÉNTICA AL TRANSMISOR)
     setupLoRa();
     
     // Conectar WiFi
@@ -232,6 +255,7 @@ void setup()
     
     Serial.println("Receptor LoRa FIWARE listo - Esperando datos GPS+Temperatura+Humedad...");
 }
+
 
 /**
  * Máquina de estados para receptor LoRa + FIWARE
@@ -251,9 +275,21 @@ void loop()
                 mensaje += (char)LoRa.read();
             }
             
+            // Mostrar información de recepción
+            int rssi = LoRa.packetRssi();
+            float snr = LoRa.packetSnr();
+            
             Serial.println("\n=== DATO RECIBIDO POR LoRa ===");
             Serial.print("Mensaje: ");
             Serial.println(mensaje);
+            Serial.print("RSSI: ");
+            Serial.print(rssi);
+            Serial.println(" dBm");
+            Serial.print("SNR: ");
+            Serial.print(snr);
+            Serial.println(" dB");
+            Serial.print("Tamaño paquete: ");
+            Serial.println(packetSize);
             
             // Extraer datos del sensor
             float lat = 0.0, lon = 0.0, temp = 0.0, hum = 0.0;
@@ -272,6 +308,9 @@ void loop()
                 state = 3; // Saltar a espera
             }
         }
+        
+        // Pequeña pausa para no saturar el CPU
+        delay(10);
     }
     break;
 
@@ -313,6 +352,4 @@ void loop()
         state = 1;
         break;
     }
-    
-    delay(50);
 }
